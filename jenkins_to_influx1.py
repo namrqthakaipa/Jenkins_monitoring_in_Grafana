@@ -199,10 +199,10 @@ class JenkinsInfluxCollector:
             response = self.make_influx_request(f"/write?db={self.influx_db}", data=payload, method='POST')
 
             if response:
-                logger.info(f"✅ {project_name} #{build_number} → Triggered by: {user_display_name}")
+                logger.info(f" {project_name} #{build_number} → Triggered by: {user_display_name}")
                 return True
             else:
-                logger.error(f"❌ Failed to insert {project_name} #{build_number}")
+                logger.error(f" Failed to insert {project_name} #{build_number}")
                 return False
         except Exception as e:
             logger.error(f"Error inserting build into InfluxDB: {e}")
