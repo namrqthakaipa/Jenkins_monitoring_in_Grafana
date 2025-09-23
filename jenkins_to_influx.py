@@ -44,9 +44,9 @@ def write_to_influx(job, build):
     line = f"{MEASUREMENT},project_name={job} build_number={build_num}i,build_duration={duration}i,build_result=\"{result}\",build_time=\"{time_str}\" {ts}"
     resp = requests.post(f"{INFLUX_URL}/write", params={"db": INFLUX_DB}, data=line)
     if resp.ok:
-        print(f"✅ {job} #{build_num} -> {result}")
+        print(f" {job} #{build_num} -> {result}")
     else:
-        print(f"❌ Influx insert failed for {job} #{build_num}")
+        print(f" Influx insert failed for {job} #{build_num}")
 
 def main():
     views = get_json(f"{JENKINS_URL}/api/json?tree=views[name,jobs[name]]")
