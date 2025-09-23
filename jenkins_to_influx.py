@@ -13,8 +13,8 @@ from requests.auth import HTTPBasicAuth
 # CONFIGURATION
 # =========================
 JENKINS_URL = os.getenv('JENKINS_URL', 'http://localhost:8080')
-JENKINS_USER = os.getenv('JENKINS_USER')  # No default value - must be provided
-JENKINS_TOKEN = os.getenv('JENKINS_TOKEN')  # No default value - must be provided
+JENKINS_USER = os.getenv('JENKINS_USER') 
+JENKINS_TOKEN = os.getenv('JENKINS_TOKEN') 
 
 INFLUX_URL = os.getenv('INFLUX_URL', 'http://localhost:8086')
 INFLUX_DB = os.getenv('INFLUX_DB', 'jenkins')
