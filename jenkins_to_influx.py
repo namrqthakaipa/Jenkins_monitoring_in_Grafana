@@ -7,11 +7,11 @@ from datetime import datetime
 # -----------------------------
 # Environment Variables
 # -----------------------------
-JENKINS_URL = os.getenv("JENKINS_URL", "http://localhost:8080").rstrip("/")
+JENKINS_URL = os.getenv("JENKINS_URL","")
 JENKINS_USER = os.getenv("JENKINS_USER", "")
 JENKINS_TOKEN = os.getenv("JENKINS_TOKEN", "")
 
-INFLUX_URL = os.getenv("INFLUX_URL", "http://localhost:8086")
+INFLUX_URL = os.getenv("INFLUX_URL", "")
 INFLUX_DB = os.getenv("INFLUX_DB", "jenkins")
 MEASUREMENT = os.getenv("MEASUREMENT", "jenkins_custom_data")
 
@@ -100,7 +100,7 @@ def main():
     for v in views.get("views", []):
         view_name = v["name"]
 
-        #  Skip All and Monitoring views
+        # 🚫 Skip All and Monitoring views
         if view_name.lower() in ["all", "monitoring"]:
             continue
 
