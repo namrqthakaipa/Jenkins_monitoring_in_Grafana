@@ -1,12 +1,4 @@
 #!/usr/bin/env python3
-"""
-Enhanced Jenkins to InfluxDB Data Collector - project_name as tag
-===============================================================
-This script captures detailed Jenkins build data, 
-tracking user info and storing project_name as a tag.
-
-Usage: python3 jenkins_to_influx.py
-"""
 
 import requests
 import json
