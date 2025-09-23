@@ -100,7 +100,7 @@ def main():
     for v in views.get("views", []):
         view_name = v["name"]
 
-        # 🚫 Skip All and Monitoring views
+        #  Skip All and Monitoring views
         if view_name.lower() in ["all", "monitoring"]:
             continue
 
