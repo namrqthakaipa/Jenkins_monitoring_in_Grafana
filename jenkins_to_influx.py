@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
+"""
+Enhanced Jenkins to InfluxDB Data Collector - project_name as tag
+===============================================================
+This script captures detailed Jenkins build data, 
+tracking user info and storing project_name as a tag.
 
+Usage: python3 jenkins_to_influx.py
+"""
 
 import requests
 import json
@@ -14,8 +21,8 @@ from requests.auth import HTTPBasicAuth
 # CONFIGURATION
 # =========================
 JENKINS_URL = os.getenv('JENKINS_URL', 'http://localhost:8080')
-JENKINS_USER = os.getenv('JENKINS_USER', 'namratha_km')
-JENKINS_TOKEN = os.getenv('JENKINS_TOKEN', '')
+JENKINS_USER = os.getenv('JENKINS_USER')  # No default value - must be provided
+JENKINS_TOKEN = os.getenv('JENKINS_TOKEN')  # No default value - must be provided
 
 INFLUX_URL = os.getenv('INFLUX_URL', 'http://localhost:8086')
 INFLUX_DB = os.getenv('INFLUX_DB', 'jenkins')
@@ -32,6 +39,14 @@ logger = logging.getLogger(__name__)
 
 class JenkinsInfluxCollector:
     def __init__(self):
+        # Validate required environment variables
+        if not JENKINS_USER:
+            logger.error("JENKINS_USER environment variable is required but not set")
+            sys.exit(1)
+        if not JENKINS_TOKEN:
+            logger.error("JENKINS_TOKEN environment variable is required but not set")
+            sys.exit(1)
+            
         self.jenkins_url = JENKINS_URL.rstrip('/')
         self.jenkins_user = JENKINS_USER
         self.jenkins_token = JENKINS_TOKEN
@@ -45,6 +60,7 @@ class JenkinsInfluxCollector:
         
         logger.info("=== JENKINS TO INFLUXDB DATA COLLECTOR - project_name as tag ===")
         logger.info(f"Jenkins URL: {self.jenkins_url}")
+        logger.info(f"Jenkins User: {self.jenkins_user}")
         logger.info(f"InfluxDB URL: {self.influx_url}")
         logger.info(f"Database: {self.influx_db}")
         logger.info(f"Measurement: {self.measurement}")
@@ -302,9 +318,6 @@ class JenkinsInfluxCollector:
         return total_jobs_processed > 0
 
     def run(self):
-        if not self.jenkins_token:
-            logger.error("JENKINS_TOKEN is required")
-            return False
         return self.process_jobs_and_builds()
 
 
