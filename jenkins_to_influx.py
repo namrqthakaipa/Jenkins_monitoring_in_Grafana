@@ -95,7 +95,6 @@ class JenkinsInfluxCollector:
 
     def extract_user_info(self, build_details):
         """Extract basic user information from build details"""
-        user_id = 'Unknown'
         user_name = 'Unknown'
         
         try:
@@ -105,9 +104,8 @@ class JenkinsInfluxCollector:
                     for cause in action['causes']:
                         # Look for user-triggered builds
                         if 'userId' in cause:
-                            user_id = cause.get('userId', 'Unknown')
-                            user_name = cause.get('userName', user_id)
-                            return user_id, user_name
+                            user_name = cause.get('userName', cause.get('userId', 'Unknown'))
+                            return user_name
                         # If no userId, check for shortDescription
                         elif 'shortDescription' in cause:
                             desc = cause['shortDescription']
@@ -116,12 +114,11 @@ class JenkinsInfluxCollector:
                                 parts = desc.split('Started by user ')
                                 if len(parts) > 1:
                                     user_name = parts[1].strip()
-                                    user_id = user_name
-                                    return user_id, user_name
+                                    return user_name
         except Exception as e:
             logger.warning(f"Error extracting user info: {e}")
         
-        return user_id, user_name
+        return user_name
 
     def insert_build_to_influx(self, project_name, project_path, view_name, build_data):
         try:
@@ -131,7 +128,7 @@ class JenkinsInfluxCollector:
             build_result = build_data.get('result', 'UNKNOWN')
             build_duration = build_data.get('duration', 0)
             build_number = build_data['number']
-            user_id, user_name = build_data.get('user_info', ('Unknown', 'Unknown'))
+            user_name = build_data.get('user_info', 'Unknown')
 
             # Escape values
             escaped_project_name = self.escape_value(project_name)
@@ -139,14 +136,14 @@ class JenkinsInfluxCollector:
             escaped_view_name = self.escape_value(view_name)
             escaped_build_result = self.escape_value(build_result)
             escaped_build_time_str = self.escape_value(build_time_str)
-            escaped_user_id = self.escape_value(user_id)
             escaped_user_name = self.escape_value(user_name)
 
+            # Tags come after measurement name, separated by commas (no spaces around =)
+            # Fields come after tags, separated by space, then fields separated by commas
             payload = (f"{self.measurement},"
                        f"project_name={escaped_project_name},"
                        f"project_path={escaped_project_path},"
-                       f"view={escaped_view_name},"
-                       f"user_id={escaped_user_id} "
+                       f"view={escaped_view_name} "
                        f"build_number={build_number}i,"
                        f"build_duration={build_duration}i,"
                        f"build_result=\"{escaped_build_result}\","
@@ -179,18 +176,18 @@ class JenkinsInfluxCollector:
             build_number = build['number']
             build_details = self.make_jenkins_request(f"/job/{job_name}/{build_number}/api/json")
             if build_details:
-                user_id, user_name = self.extract_user_info(build_details)
+                user_name = self.extract_user_info(build_details)
                 enhanced_build = {
                     'number': build_details.get('number', build['number']),
                     'timestamp': build_details.get('timestamp', build.get('timestamp', 0)),
                     'duration': build_details.get('duration', build.get('duration', 0)),
                     'result': build_details.get('result', build.get('result', 'UNKNOWN')),
                     'url': build_details.get('url', build.get('url', '')),
-                    'user_info': (user_id, user_name)
+                    'user_info': user_name
                 }
                 detailed_builds.append(enhanced_build)
             else:
-                build['user_info'] = ('Unknown', 'Unknown')
+                build['user_info'] = 'Unknown'
                 detailed_builds.append(build)
         return detailed_builds
 
@@ -242,7 +239,7 @@ class JenkinsInfluxCollector:
                 builds = self.get_job_builds(job_name, job_full_name)
                 for build in builds:
                     build_number = build['number']
-                    user_id, user_name = build.get('user_info', ('Unknown', 'Unknown'))
+                    user_name = build.get('user_info', 'Unknown')
                     
                     if user_name in user_stats:
                         user_stats[user_name] += 1
