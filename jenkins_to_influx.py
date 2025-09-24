@@ -231,6 +231,8 @@ class JenkinsInfluxCollector:
             view_name = view['name']
             if view_name.lower() == 'all' and len(views) > 1:
                 continue
+            if view_name.lower() == 'monitoring':
+                continue
             jobs = view.get('jobs', [])
             for job in jobs:
                 job_name = job['name']
