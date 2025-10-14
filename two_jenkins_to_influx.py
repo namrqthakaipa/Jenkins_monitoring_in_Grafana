@@ -172,9 +172,14 @@ class JenkinsInfluxCollector:
         endpoint = f"/job/{job_name}/api/json?tree=builds[number,timestamp,duration,result,url]"
         job_data = self.make_jenkins_request(endpoint)
         if not job_data:
+            logger.warning(f"Could not fetch builds for job: {job_name}")
             return []
 
         builds = job_data.get('builds', [])
+        if not builds:
+            logger.info(f"No builds found for job: {job_name}")
+            return []
+            
         detailed_builds = []
 
         for build in builds:
@@ -212,20 +217,45 @@ class JenkinsInfluxCollector:
             logger.warning(f"Error checking duplicate: {e}")
             return False
 
-    def get_jenkins_views(self):
-        jenkins_data = self.make_jenkins_request('/api/json?tree=views[name,url,jobs[name,fullName,url]]')
+    def get_all_jobs(self):
+        """Get all jobs directly from Jenkins root API"""
+        logger.info("Fetching all jobs from Jenkins...")
+        jenkins_data = self.make_jenkins_request('/api/json?tree=jobs[name,fullName,url]')
         if not jenkins_data:
-            jenkins_data = self.make_jenkins_request('/api/json')
-        if not jenkins_data:
+            logger.error("Failed to fetch jobs from Jenkins")
             return []
-        views = jenkins_data.get('views', [])
-        if not views and jenkins_data.get('jobs'):
-            views = [{'name': 'All', 'url': f"{self.jenkins_url}/", 'jobs': jenkins_data['jobs']}]
+        
+        jobs = jenkins_data.get('jobs', [])
+        logger.info(f"Found {len(jobs)} jobs")
+        for job in jobs:
+            logger.info(f"  - {job.get('name', 'Unknown')}")
+        return jobs
+
+    def get_jenkins_views(self):
+        """Get views from Jenkins - always fetch jobs directly instead of using views"""
+        logger.info("Fetching all jobs directly from Jenkins...")
+        
+        # Always fetch all jobs directly to avoid "All" view issue
+        all_jobs = self.get_all_jobs()
+        
+        if not all_jobs:
+            logger.error("No jobs found in Jenkins")
+            return []
+        
+        # Create a single view with all jobs, using "Jobs" as the view name
+        views = [{
+            'name': 'Jobs',
+            'url': f"{self.jenkins_url}/",
+            'jobs': all_jobs
+        }]
+        
+        logger.info(f"Created 'Jobs' view with {len(all_jobs)} jobs")
         return views
 
     def process_jobs_and_builds(self):
         views = self.get_jenkins_views()
         if not views:
+            logger.error("No views found with jobs to process")
             return False
 
         total_jobs_processed = 0
@@ -235,16 +265,20 @@ class JenkinsInfluxCollector:
 
         for view in views:
             view_name = view['name']
-            if view_name.lower() == 'all' and len(views) > 1:
-                continue
-            if view_name.lower() == 'monitoring':
-                continue
             jobs = view.get('jobs', [])
+            
+            logger.info(f"Processing view '{view_name}' with {len(jobs)} jobs")
+            
             for job in jobs:
                 job_name = job['name']
                 job_full_name = job.get('fullName', job_name)
                 total_jobs_processed += 1
+                
+                logger.info(f"Processing job: {job_name}")
                 builds = self.get_job_builds(job_name, job_full_name)
+                
+                logger.info(f"  Found {len(builds)} builds")
+                
                 for build in builds:
                     build_number = build['number']
                     user_name = build.get('user_info', 'Unknown')
