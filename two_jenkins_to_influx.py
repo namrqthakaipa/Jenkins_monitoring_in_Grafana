@@ -230,12 +230,8 @@ class JenkinsInfluxCollector:
         """Get all views and their jobs from Jenkins"""
         logger.info("Fetching Jenkins views...")
         
-        # Try to get views with jobs
-        jenkins_data = self.make_jenkins_request('/api/json?tree=views[name,url,jobs[name,fullName,url]]')
-        
-        if not jenkins_data:
-            logger.warning("Could not fetch views, trying fallback...")
-            jenkins_data = self.make_jenkins_request('/api/json')
+        # First, get the list of views
+        jenkins_data = self.make_jenkins_request('/api/json?tree=views[name,url,_class]')
         
         if not jenkins_data:
             logger.error("Failed to fetch any data from Jenkins API")
@@ -244,16 +240,37 @@ class JenkinsInfluxCollector:
         views = jenkins_data.get('views', [])
         logger.info(f"Found {len(views)} views")
         
-        # If no views but there are jobs at root level
-        if not views and jenkins_data.get('jobs'):
-            logger.info("No views found, using root-level jobs")
-            views = [{'name': 'All', 'url': f"{self.jenkins_url}/", 'jobs': jenkins_data['jobs']}]
-        
-        # Log view details
+        # Now fetch jobs for each view individually
         for view in views:
             view_name = view.get('name', 'Unknown')
-            job_count = len(view.get('jobs', []))
-            logger.info(f"View '{view_name}' has {job_count} jobs")
+            view_url = view.get('url', '')
+            
+            # Extract view path from URL for API call
+            if '/view/' in view_url:
+                # Parse view name from URL (e.g., http://jenkins/view/Capstone-project/)
+                view_path = view_url.rstrip('/').split('/view/')[-1]
+                
+                # Fetch jobs for this specific view
+                view_endpoint = f"/view/{urllib.parse.quote(view_path, safe='')}/api/json?tree=jobs[name,fullName,url,_class]"
+                logger.info(f"Fetching jobs for view '{view_name}'")
+                view_data = self.make_jenkins_request(view_endpoint)
+                
+                if view_data:
+                    view['jobs'] = view_data.get('jobs', [])
+                    logger.info(f"View '{view_name}' has {len(view['jobs'])} jobs")
+                else:
+                    logger.warning(f"Could not fetch jobs for view '{view_name}'")
+                    view['jobs'] = []
+            else:
+                # This is the "all" view or root view
+                logger.info(f"View '{view_name}' is root/all view")
+                # Fetch root level jobs
+                root_data = self.make_jenkins_request('/api/json?tree=jobs[name,fullName,url,_class]')
+                if root_data:
+                    view['jobs'] = root_data.get('jobs', [])
+                    logger.info(f"View '{view_name}' has {len(view['jobs'])} jobs")
+                else:
+                    view['jobs'] = []
         
         return views
 
@@ -275,9 +292,9 @@ class JenkinsInfluxCollector:
             view_name = view['name']
             logger.info(f"Processing view: {view_name}")
             
-            # Skip 'All' view if there are other views
+            # Always skip 'All' view if there are other views
             if view_name.lower() == 'all' and len(views) > 1:
-                logger.info("Skipping 'All' view (other views exist)")
+                logger.info("Skipping 'All' view (processing only specific views)")
                 continue
             
             # Skip monitoring view
@@ -325,6 +342,7 @@ class JenkinsInfluxCollector:
 
         logger.info("")
         logger.info(f"=== SUMMARY FOR {self.jenkins_instance} ===")
+        logger.info(f"Total views processed: {len([v for v in views if v['name'].lower() not in ['all', 'monitoring']])}")
         logger.info(f"Total jobs processed: {total_jobs_processed}")
         logger.info(f"Total new builds inserted: {total_builds_processed}")
         logger.info(f"Total builds skipped: {skipped_builds}")
@@ -336,8 +354,15 @@ class JenkinsInfluxCollector:
         else:
             logger.warning("No user activity found")
         
-        # Return success if we processed any jobs, even if no new builds were inserted
-        return total_jobs_processed > 0
+        # Return success if we found views to process (even if no jobs/builds found)
+        # This prevents failure when views are empty
+        processed_views = [v for v in views if v['name'].lower() not in ['all', 'monitoring']]
+        if processed_views:
+            logger.info(f"Successfully processed {len(processed_views)} view(s)")
+            return True
+        else:
+            logger.warning("No valid views to process")
+            return total_jobs_processed > 0
 
     def run(self):
         """Execute the collector"""
