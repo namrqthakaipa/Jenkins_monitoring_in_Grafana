@@ -15,7 +15,7 @@ from requests.auth import HTTPBasicAuth
 JENKINS_URL = os.getenv('JENKINS_URL', '')
 JENKINS_USER = os.getenv('JENKINS_USER') 
 JENKINS_TOKEN = os.getenv('JENKINS_TOKEN')
-JENKINS_INSTANCE = os.getenv('JENKINS_INSTANCE', 'unknown')  # NEW: Server identifier
+JENKINS_INSTANCE = os.getenv('JENKINS_INSTANCE', 'unknown')
 
 INFLUX_URL = os.getenv('INFLUX_URL', '')
 INFLUX_DB = os.getenv('INFLUX_DB', 'jenkins')
@@ -39,11 +39,14 @@ class JenkinsInfluxCollector:
         if not JENKINS_TOKEN:
             logger.error("JENKINS_TOKEN environment variable is required but not set")
             sys.exit(1)
+        if not JENKINS_URL:
+            logger.error("JENKINS_URL environment variable is required but not set")
+            sys.exit(1)
             
         self.jenkins_url = JENKINS_URL.rstrip('/')
         self.jenkins_user = JENKINS_USER
         self.jenkins_token = JENKINS_TOKEN
-        self.jenkins_instance = JENKINS_INSTANCE  # NEW: Store server identifier
+        self.jenkins_instance = JENKINS_INSTANCE
         self.influx_url = INFLUX_URL.rstrip('/')
         self.influx_db = INFLUX_DB
         self.measurement = MEASUREMENT
@@ -53,7 +56,7 @@ class JenkinsInfluxCollector:
         self.session.auth = self.auth
         
         logger.info("=== JENKINS TO INFLUXDB DATA COLLECTOR ===")
-        logger.info(f"Jenkins Instance: {self.jenkins_instance}")  # NEW: Log instance
+        logger.info(f"Jenkins Instance: {self.jenkins_instance}")
         logger.info(f"Jenkins URL: {self.jenkins_url}")
         logger.info(f"Jenkins User: {self.jenkins_user}")
         logger.info(f"InfluxDB URL: {self.influx_url}")
@@ -73,9 +76,17 @@ class JenkinsInfluxCollector:
     def make_jenkins_request(self, endpoint, timeout=30):
         url = f"{self.jenkins_url}{endpoint}"
         try:
+            logger.debug(f"Making request to: {url}")
             response = self.session.get(url, timeout=timeout)
             response.raise_for_status()
             return response.json()
+        except requests.exceptions.HTTPError as e:
+            logger.error(f"HTTP Error {response.status_code} for {url}: {e}")
+            if response.status_code == 404:
+                logger.error("Resource not found - check if the job/endpoint exists")
+            elif response.status_code == 403:
+                logger.error("Access forbidden - check credentials and permissions")
+            return None
         except requests.exceptions.RequestException as e:
             logger.error(f"Error making request to {url}: {e}")
             return None
@@ -105,15 +116,12 @@ class JenkinsInfluxCollector:
             for action in actions:
                 if isinstance(action, dict) and 'causes' in action:
                     for cause in action['causes']:
-                        # Look for user-triggered builds
                         if 'userId' in cause:
                             user_name = cause.get('userName', cause.get('userId', 'Unknown'))
                             return user_name
-                        # If no userId, check for shortDescription
                         elif 'shortDescription' in cause:
                             desc = cause['shortDescription']
                             if 'Started by user' in desc:
-                                # Extract username from description like "Started by user admin"
                                 parts = desc.split('Started by user ')
                                 if len(parts) > 1:
                                     user_name = parts[1].strip()
@@ -140,16 +148,13 @@ class JenkinsInfluxCollector:
             escaped_build_result = self.escape_value(build_result)
             escaped_build_time_str = self.escape_value(build_time_str)
             escaped_user_name = self.escape_value(user_name)
-            escaped_server = self.escape_value(self.jenkins_instance)  # NEW: Escape server name
+            escaped_server = self.escape_value(self.jenkins_instance)
 
-            # Tags come after measurement name, separated by commas (no spaces around =)
-            # Fields come after tags, separated by space, then fields separated by commas
-            # NEW: Added 'server' as a tag for better filtering in InfluxDB
             payload = (f"{self.measurement},"
                        f"project_name={escaped_project_name},"
                        f"project_path={escaped_project_path},"
                        f"view={escaped_view_name},"
-                       f"server={escaped_server} "  # NEW: Server tag
+                       f"server={escaped_server} "
                        f"build_number={build_number}i,"
                        f"build_duration={build_duration}i,"
                        f"build_result=\"{escaped_build_result}\","
@@ -170,17 +175,25 @@ class JenkinsInfluxCollector:
             return False
 
     def get_job_builds(self, job_name, job_full_name):
-        endpoint = f"/job/{job_name}/api/json?tree=builds[number,timestamp,duration,result,url]"
+        """Get builds for a specific job - handles both simple and folder jobs"""
+        # URL encode the job path for folder-based jobs
+        encoded_job_path = '/job/'.join(urllib.parse.quote(part, safe='') for part in job_full_name.split('/'))
+        endpoint = f"/job/{encoded_job_path}/api/json?tree=builds[number,timestamp,duration,result,url]"
+        
+        logger.debug(f"Fetching builds for job: {job_full_name}")
         job_data = self.make_jenkins_request(endpoint)
         if not job_data:
+            logger.warning(f"Could not fetch job data for: {job_name}")
             return []
 
         builds = job_data.get('builds', [])
+        logger.info(f"Found {len(builds)} builds for job: {job_name}")
         detailed_builds = []
 
         for build in builds:
             build_number = build['number']
-            build_details = self.make_jenkins_request(f"/job/{job_name}/{build_number}/api/json")
+            build_endpoint = f"/job/{encoded_job_path}/{build_number}/api/json"
+            build_details = self.make_jenkins_request(build_endpoint)
             if build_details:
                 user_name = self.extract_user_info(build_details)
                 enhanced_build = {
@@ -199,7 +212,6 @@ class JenkinsInfluxCollector:
 
     def is_build_already_inserted(self, project_name, project_path, view_name, build_number):
         try:
-            # NEW: Include server in the duplicate check query
             query = f"SELECT build_number FROM {self.measurement} WHERE project_name='{self.escape_influx_query(project_name)}' " \
                     f"AND project_path='{self.escape_influx_query(project_path)}' " \
                     f"AND view='{self.escape_influx_query(view_name)}' " \
@@ -215,19 +227,43 @@ class JenkinsInfluxCollector:
             return False
 
     def get_jenkins_views(self):
+        """Get all views and their jobs from Jenkins"""
+        logger.info("Fetching Jenkins views...")
+        
+        # Try to get views with jobs
         jenkins_data = self.make_jenkins_request('/api/json?tree=views[name,url,jobs[name,fullName,url]]')
+        
         if not jenkins_data:
+            logger.warning("Could not fetch views, trying fallback...")
             jenkins_data = self.make_jenkins_request('/api/json')
+        
         if not jenkins_data:
+            logger.error("Failed to fetch any data from Jenkins API")
             return []
+        
         views = jenkins_data.get('views', [])
+        logger.info(f"Found {len(views)} views")
+        
+        # If no views but there are jobs at root level
         if not views and jenkins_data.get('jobs'):
+            logger.info("No views found, using root-level jobs")
             views = [{'name': 'All', 'url': f"{self.jenkins_url}/", 'jobs': jenkins_data['jobs']}]
+        
+        # Log view details
+        for view in views:
+            view_name = view.get('name', 'Unknown')
+            job_count = len(view.get('jobs', []))
+            logger.info(f"View '{view_name}' has {job_count} jobs")
+        
         return views
 
     def process_jobs_and_builds(self):
+        """Main processing function"""
+        logger.info("Starting job and build processing...")
+        
         views = self.get_jenkins_views()
         if not views:
+            logger.error("No views found - exiting")
             return False
 
         total_jobs_processed = 0
@@ -237,16 +273,40 @@ class JenkinsInfluxCollector:
 
         for view in views:
             view_name = view['name']
+            logger.info(f"Processing view: {view_name}")
+            
+            # Skip 'All' view if there are other views
             if view_name.lower() == 'all' and len(views) > 1:
+                logger.info("Skipping 'All' view (other views exist)")
                 continue
+            
+            # Skip monitoring view
             if view_name.lower() == 'monitoring':
+                logger.info("Skipping 'Monitoring' view")
                 continue
+            
             jobs = view.get('jobs', [])
+            logger.info(f"Found {len(jobs)} jobs in view '{view_name}'")
+            
             for job in jobs:
                 job_name = job['name']
                 job_full_name = job.get('fullName', job_name)
+                job_class = job.get('_class', '')
+                
+                logger.info(f"Processing job: {job_name} (type: {job_class})")
+                
+                # Skip folder jobs - they don't have builds
+                if 'Folder' in job_class:
+                    logger.info(f"Skipping folder: {job_name}")
+                    continue
+                
                 total_jobs_processed += 1
                 builds = self.get_job_builds(job_name, job_full_name)
+                
+                if not builds:
+                    logger.warning(f"No builds found for job: {job_name}")
+                    continue
+                
                 for build in builds:
                     build_number = build['number']
                     user_name = build.get('user_info', 'Unknown')
@@ -261,18 +321,31 @@ class JenkinsInfluxCollector:
                             total_builds_processed += 1
                     else:
                         skipped_builds += 1
+                        logger.debug(f"Skipped duplicate: {job_name} #{build_number}")
 
-        logger.info(f"=== SUMMARY FOR {self.jenkins_instance} ===")  # NEW: Include server in summary
+        logger.info("")
+        logger.info(f"=== SUMMARY FOR {self.jenkins_instance} ===")
         logger.info(f"Total jobs processed: {total_jobs_processed}")
         logger.info(f"Total new builds inserted: {total_builds_processed}")
         logger.info(f"Total builds skipped: {skipped_builds}")
-        logger.info("=== USER ACTIVITY ===")
-        for user, count in sorted(user_stats.items(), key=lambda x: x[1], reverse=True):
-            logger.info(f"{user}: {count} builds")
+        
+        if user_stats:
+            logger.info("=== USER ACTIVITY ===")
+            for user, count in sorted(user_stats.items(), key=lambda x: x[1], reverse=True):
+                logger.info(f"{user}: {count} builds")
+        else:
+            logger.warning("No user activity found")
+        
+        # Return success if we processed any jobs, even if no new builds were inserted
         return total_jobs_processed > 0
 
     def run(self):
-        return self.process_jobs_and_builds()
+        """Execute the collector"""
+        try:
+            return self.process_jobs_and_builds()
+        except Exception as e:
+            logger.error(f"Unexpected error during execution: {e}", exc_info=True)
+            return False
 
 
 def main():
