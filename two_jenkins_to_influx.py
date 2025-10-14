@@ -14,8 +14,8 @@ from requests.auth import HTTPBasicAuth
 # =========================
 JENKINS_URL = os.getenv('JENKINS_URL', '')
 JENKINS_USER = os.getenv('JENKINS_USER') 
-JENKINS_TOKEN = os.getenv('JENKINS_TOKEN') 
-JENKINS_INSTANCE = os.getenv('JENKINS_INSTANCE', 'default')
+JENKINS_TOKEN = os.getenv('JENKINS_TOKEN')
+JENKINS_INSTANCE = os.getenv('JENKINS_INSTANCE', 'unknown')  # NEW: Server identifier
 
 INFLUX_URL = os.getenv('INFLUX_URL', '')
 INFLUX_DB = os.getenv('INFLUX_DB', 'jenkins')
@@ -43,7 +43,7 @@ class JenkinsInfluxCollector:
         self.jenkins_url = JENKINS_URL.rstrip('/')
         self.jenkins_user = JENKINS_USER
         self.jenkins_token = JENKINS_TOKEN
-        self.jenkins_instance = JENKINS_INSTANCE
+        self.jenkins_instance = JENKINS_INSTANCE  # NEW: Store server identifier
         self.influx_url = INFLUX_URL.rstrip('/')
         self.influx_db = INFLUX_DB
         self.measurement = MEASUREMENT
@@ -53,7 +53,7 @@ class JenkinsInfluxCollector:
         self.session.auth = self.auth
         
         logger.info("=== JENKINS TO INFLUXDB DATA COLLECTOR ===")
-        logger.info(f"Jenkins Instance: {self.jenkins_instance}")
+        logger.info(f"Jenkins Instance: {self.jenkins_instance}")  # NEW: Log instance
         logger.info(f"Jenkins URL: {self.jenkins_url}")
         logger.info(f"Jenkins User: {self.jenkins_user}")
         logger.info(f"InfluxDB URL: {self.influx_url}")
@@ -140,15 +140,16 @@ class JenkinsInfluxCollector:
             escaped_build_result = self.escape_value(build_result)
             escaped_build_time_str = self.escape_value(build_time_str)
             escaped_user_name = self.escape_value(user_name)
-            escaped_jenkins_instance = self.escape_value(self.jenkins_instance)
+            escaped_server = self.escape_value(self.jenkins_instance)  # NEW: Escape server name
 
             # Tags come after measurement name, separated by commas (no spaces around =)
             # Fields come after tags, separated by space, then fields separated by commas
+            # NEW: Added 'server' as a tag for better filtering in InfluxDB
             payload = (f"{self.measurement},"
-                       f"jenkins_instance={escaped_jenkins_instance},"
                        f"project_name={escaped_project_name},"
                        f"project_path={escaped_project_path},"
-                       f"view={escaped_view_name} "
+                       f"view={escaped_view_name},"
+                       f"server={escaped_server} "  # NEW: Server tag
                        f"build_number={build_number}i,"
                        f"build_duration={build_duration}i,"
                        f"build_result=\"{escaped_build_result}\","
@@ -172,14 +173,9 @@ class JenkinsInfluxCollector:
         endpoint = f"/job/{job_name}/api/json?tree=builds[number,timestamp,duration,result,url]"
         job_data = self.make_jenkins_request(endpoint)
         if not job_data:
-            logger.warning(f"Could not fetch builds for job: {job_name}")
             return []
 
         builds = job_data.get('builds', [])
-        if not builds:
-            logger.info(f"No builds found for job: {job_name}")
-            return []
-            
         detailed_builds = []
 
         for build in builds:
@@ -203,10 +199,11 @@ class JenkinsInfluxCollector:
 
     def is_build_already_inserted(self, project_name, project_path, view_name, build_number):
         try:
-            query = f"SELECT build_number FROM {self.measurement} WHERE jenkins_instance='{self.escape_influx_query(self.jenkins_instance)}' " \
-                    f"AND project_name='{self.escape_influx_query(project_name)}' " \
+            # NEW: Include server in the duplicate check query
+            query = f"SELECT build_number FROM {self.measurement} WHERE project_name='{self.escape_influx_query(project_name)}' " \
                     f"AND project_path='{self.escape_influx_query(project_path)}' " \
                     f"AND view='{self.escape_influx_query(view_name)}' " \
+                    f"AND server='{self.escape_influx_query(self.jenkins_instance)}' " \
                     f"AND build_number={build_number}"
             encoded_query = urllib.parse.quote(query)
             response = self.make_influx_request(f"/query?db={self.influx_db}&q={encoded_query}")
@@ -217,45 +214,20 @@ class JenkinsInfluxCollector:
             logger.warning(f"Error checking duplicate: {e}")
             return False
 
-    def get_all_jobs(self):
-        """Get all jobs directly from Jenkins root API"""
-        logger.info("Fetching all jobs from Jenkins...")
-        jenkins_data = self.make_jenkins_request('/api/json?tree=jobs[name,fullName,url]')
-        if not jenkins_data:
-            logger.error("Failed to fetch jobs from Jenkins")
-            return []
-        
-        jobs = jenkins_data.get('jobs', [])
-        logger.info(f"Found {len(jobs)} jobs")
-        for job in jobs:
-            logger.info(f"  - {job.get('name', 'Unknown')}")
-        return jobs
-
     def get_jenkins_views(self):
-        """Get views from Jenkins - always fetch jobs directly instead of using views"""
-        logger.info("Fetching all jobs directly from Jenkins...")
-        
-        # Always fetch all jobs directly to avoid "All" view issue
-        all_jobs = self.get_all_jobs()
-        
-        if not all_jobs:
-            logger.error("No jobs found in Jenkins")
+        jenkins_data = self.make_jenkins_request('/api/json?tree=views[name,url,jobs[name,fullName,url]]')
+        if not jenkins_data:
+            jenkins_data = self.make_jenkins_request('/api/json')
+        if not jenkins_data:
             return []
-        
-        # Create a single view with all jobs, using "Jobs" as the view name
-        views = [{
-            'name': 'Jobs',
-            'url': f"{self.jenkins_url}/",
-            'jobs': all_jobs
-        }]
-        
-        logger.info(f"Created 'Jobs' view with {len(all_jobs)} jobs")
+        views = jenkins_data.get('views', [])
+        if not views and jenkins_data.get('jobs'):
+            views = [{'name': 'All', 'url': f"{self.jenkins_url}/", 'jobs': jenkins_data['jobs']}]
         return views
 
     def process_jobs_and_builds(self):
         views = self.get_jenkins_views()
         if not views:
-            logger.error("No views found with jobs to process")
             return False
 
         total_jobs_processed = 0
@@ -265,20 +237,16 @@ class JenkinsInfluxCollector:
 
         for view in views:
             view_name = view['name']
+            if view_name.lower() == 'all' and len(views) > 1:
+                continue
+            if view_name.lower() == 'monitoring':
+                continue
             jobs = view.get('jobs', [])
-            
-            logger.info(f"Processing view '{view_name}' with {len(jobs)} jobs")
-            
             for job in jobs:
                 job_name = job['name']
                 job_full_name = job.get('fullName', job_name)
                 total_jobs_processed += 1
-                
-                logger.info(f"Processing job: {job_name}")
                 builds = self.get_job_builds(job_name, job_full_name)
-                
-                logger.info(f"  Found {len(builds)} builds")
-                
                 for build in builds:
                     build_number = build['number']
                     user_name = build.get('user_info', 'Unknown')
@@ -294,10 +262,11 @@ class JenkinsInfluxCollector:
                     else:
                         skipped_builds += 1
 
-        logger.info(f"[{self.jenkins_instance}] Total jobs processed: {total_jobs_processed}")
-        logger.info(f"[{self.jenkins_instance}] Total new builds inserted: {total_builds_processed}")
-        logger.info(f"[{self.jenkins_instance}] Total builds skipped: {skipped_builds}")
-        logger.info(f"=== [{self.jenkins_instance}] USER ACTIVITY ===")
+        logger.info(f"=== SUMMARY FOR {self.jenkins_instance} ===")  # NEW: Include server in summary
+        logger.info(f"Total jobs processed: {total_jobs_processed}")
+        logger.info(f"Total new builds inserted: {total_builds_processed}")
+        logger.info(f"Total builds skipped: {skipped_builds}")
+        logger.info("=== USER ACTIVITY ===")
         for user, count in sorted(user_stats.items(), key=lambda x: x[1], reverse=True):
             logger.info(f"{user}: {count} builds")
         return total_jobs_processed > 0
