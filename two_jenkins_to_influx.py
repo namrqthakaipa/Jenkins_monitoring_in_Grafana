@@ -17,9 +17,9 @@ JENKINS_USER = os.getenv('JENKINS_USER')
 JENKINS_TOKEN = os.getenv('JENKINS_TOKEN')
 JENKINS_INSTANCE = os.getenv('JENKINS_INSTANCE', 'unknown')
 
-INFLUX_URL = os.getenv('INFLUX_URL', '')
-INFLUX_DB = os.getenv('INFLUX_DB', 'jenkins')
-MEASUREMENT = os.getenv('MEASUREMENT', 'jenkins_custom_data')
+INFLUX_URL = os.getenv('INFLUX_URL')
+INFLUX_DB = os.getenv('INFLUX_DB')
+MEASUREMENT = os.getenv('MEASUREMENT')
 
 # =========================
 # LOGGING SETUP
