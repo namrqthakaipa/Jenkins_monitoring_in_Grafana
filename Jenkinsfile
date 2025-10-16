@@ -1,0 +1,104 @@
+pipeline {
+    agent any
+    
+    environment {
+        // InfluxDB Configuration
+        INFLUX_URL = "http://localhost:8086"
+        INFLUX_DB = "jenkins"
+        MEASUREMENT = "jenkins_custom_data_Two_Jenkins"
+        PYTHON_SCRIPT = "two_jenkins_to_influx.py"
+    }
+    
+    stages {
+        stage('Checkout Scripts') {
+            steps {
+                script {
+                    echo "STAGE: Checking out monitoring scripts from GitHub"
+                    cleanWs()
+                    git branch: 'main', 
+                        credentialsId: 'github-token-creds', 
+                        url: 'https://github.com/namrqthakaipa/monitoring-scripts.git'
+                }
+            }
+        }
+        
+        stage('Verify Script') {
+            steps {
+                script {
+                    echo "Verifying Python script exists..."
+                    sh """
+                        ls -la ${WORKSPACE}
+                        if [ -f "${WORKSPACE}/${PYTHON_SCRIPT}" ]; then
+                            echo "✓ Python script found"
+                        else
+                            echo "✗ Python script NOT found"
+                            exit 1
+                        fi
+                    """
+                }
+            }
+        }
+        
+        stage('Scrape Localhost Jenkins') {
+            steps {
+                script {
+                    echo "=== Scraping Jenkins: localhost ==="
+                    withCredentials([
+                        usernamePassword(
+                            credentialsId: 'jenkins-readonly-creds',
+                            usernameVariable: 'JENKINS_USER',
+                            passwordVariable: 'JENKINS_TOKEN'
+                        )
+                    ]) {
+                        sh """
+                            export JENKINS_URL="http://localhost:8080"
+                            export JENKINS_USER="\${JENKINS_USER}"
+                            export JENKINS_TOKEN="\${JENKINS_TOKEN}"
+                            export INFLUX_URL="${INFLUX_URL}"
+                            export INFLUX_DB="${INFLUX_DB}"
+                            export MEASUREMENT="${MEASUREMENT}"
+                            export JENKINS_INSTANCE="localhost"
+                            
+                            echo "Processing localhost Jenkins"
+                            python3 "${WORKSPACE}/${PYTHON_SCRIPT}"
+                        """
+                    }
+                }
+            }
+        }
+        
+        stage('Scrape EC2 Jenkins') {
+            steps {
+                script {
+                    echo "=== Scraping Jenkins: EC2 Server ==="
+                    withCredentials([
+                        string(credentialsId: 'jenkins-server2-url', variable: 'EC2_JENKINS_URL'),
+                        usernamePassword(
+                            credentialsId: 'jenkins-server2-creds',
+                            usernameVariable: 'JENKINS_USER',
+                            passwordVariable: 'JENKINS_TOKEN'
+                        )
+                    ]) {
+                        sh """
+                            export JENKINS_URL="\${EC2_JENKINS_URL}"
+                            export JENKINS_USER="\${JENKINS_USER}"
+                            export JENKINS_TOKEN="\${JENKINS_TOKEN}"
+                            export INFLUX_URL="${INFLUX_URL}"
+                            export INFLUX_DB="${INFLUX_DB}"
+                            export MEASUREMENT="${MEASUREMENT}"
+                            export JENKINS_INSTANCE="ec2-server"
+                            
+                            echo "Processing EC2 Jenkins at \${EC2_JENKINS_URL}"
+                            echo "Testing connection..."
+                            curl -s -o /dev/null -w "HTTP Status: %{http_code}\\n" -u "\${JENKINS_USER}:\${JENKINS_TOKEN}" "\${EC2_JENKINS_URL}/api/json"
+                            
+                            echo "Running Python script..."
+                            python3 "${WORKSPACE}/${PYTHON_SCRIPT}"
+                        """
+                    }
+                }
+            }
+        }
+    }
+    
+}
